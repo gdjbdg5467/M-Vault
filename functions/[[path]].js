@@ -2,7 +2,7 @@ import {
   buildConfig,
   handleFileRequest as cftcHandleFileRequest,
   initDatabase as cftcInitDatabase,
-} from '../utils/cftc-core.js';
+} from './utils/cftc-core.js';
 
 /**
  * Catch-all 直链路由（cftc 格式：https://domain/{path}）
