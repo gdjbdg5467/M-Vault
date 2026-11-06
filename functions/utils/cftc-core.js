@@ -1374,7 +1374,7 @@ async function handleMediaUpload(chatId, file, isDocument, config, userSetting) 
     let finalUrl, dbFileId, dbMessageId;
     const timestamp = Date.now();
     const typeSuffix = getTypeSuffix(mainType, ext);
-    const key = `${timestamp}_${typeSuffix}.${ext}`;
+    const key = await generateStorageKey(config, typeSuffix, ext);
     if (storageType === 'r2' && config.bucket) {
       const arrayBuffer = await fileResponse.arrayBuffer();
       await config.bucket.put(key, arrayBuffer, { 
@@ -2309,6 +2309,22 @@ function getTypeSuffix(mainType, ext) {
   if (e === 'apk') return 'app';
   if (e === 'pdf') return 'pdf';
   return 'file';
+}
+async function generateStorageKey(config, typeSuffix, ext) {
+  const candidate = () => `${1000 + Math.floor(Math.random() * 9000)}_${typeSuffix}.${ext}`;
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    const key = candidate();
+    if (config.imgUrl) {
+      try {
+        const existing = await config.imgUrl.get(key);
+        if (existing !== null) continue;
+      } catch {
+        return key;
+      }
+    }
+    return key;
+  }
+  return candidate();
 }
 async function handleBingImagesRequest(request, config) {
   const cache = caches.default;
