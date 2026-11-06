@@ -457,9 +457,10 @@ export {
   fetchNotification,
   copyShareUrl
 };
-async function handleTelegramWebhook(request, config) {
+async function handleTelegramWebhook(requestOrUpdate, config) {
   try {
-    const update = await request.json();
+    // 兼容：接受已解析的 update 对象（webhook.js 已读 body），或原始 Request（内部解析）
+    const update = requestOrUpdate && typeof requestOrUpdate.json === 'function' ? await requestOrUpdate.json() : requestOrUpdate;
     let chatId;
     let userId;
     if (update.message) {

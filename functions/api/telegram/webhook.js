@@ -62,7 +62,7 @@ export async function onRequestPost(context) {
         return jsonResponse({ ok: false, error: 'DB init failed: ' + dbError.message }, 500);
       }
       try {
-        await cftcHandleTelegramWebhook(request, cftcConfig);
+        await cftcHandleTelegramWebhook(update, cftcConfig);
       } catch (cftcError) {
         console.error('cftc webhook handling failed:', cftcError);
       }
