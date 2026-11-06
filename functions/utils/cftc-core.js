@@ -405,6 +405,7 @@ export function buildConfig(env, request) {
     cookie: Number(env.COOKIE) || 7,
     maxSizeMB: Number(env.MAX_SIZE_MB) || 20,
     bucket: env.R2_BUCKET || env.BUCKET,
+    imgUrl: env.img_url,
     fileCache: new Map(),
     fileCacheTTL: 3600000,
     buttonCache: new Map(),
@@ -1372,8 +1373,8 @@ async function handleMediaUpload(chatId, file, isDocument, config, userSetting) 
     const storageType = userSetting && userSetting.storage_type ? userSetting.storage_type : 'r2';
     let finalUrl, dbFileId, dbMessageId;
     const timestamp = Date.now();
-    const originalFileName = fileName.replace(/[^a-zA-Z0-9\-\_\.]/g, '_'); 
-    const key = `${timestamp}_${originalFileName}`;
+    const typeSuffix = getTypeSuffix(mainType, ext);
+    const key = `${timestamp}_${typeSuffix}.${ext}`;
     if (storageType === 'r2' && config.bucket) {
       const arrayBuffer = await fileResponse.arrayBuffer();
       await config.bucket.put(key, arrayBuffer, { 
@@ -1496,6 +1497,26 @@ async function handleMediaUpload(chatId, file, isDocument, config, userSetting) 
       categoryId,
       storageType
     ).run();
+    if (config.imgUrl) {
+      try {
+        const kvMetadata = {
+          fileName: fileName,
+          TimeStamp: time,
+          storageType: storageType,
+          telegramFileId: dbFileId,
+          telegramMessageId: dbMessageId,
+          cftcUrl: finalUrl,
+          liked: false,
+          ListType: 'None',
+          Label: 'None',
+          source: 'cftc-upload',
+        };
+        if (storageType === 'r2') kvMetadata.r2Key = key;
+        await config.imgUrl.put(key, '', { metadata: kvMetadata });
+      } catch (kvError) {
+        console.error('KV 写入失败:', kvError.message);
+      }
+    }
     if (processingMessageId) {
       await fetch(`https://api.telegram.org/bot${config.tgBotToken}/deleteMessage`, {
         method: 'POST',
@@ -2279,6 +2300,15 @@ function getContentType(ext) {
   };
   const lowerExt = ext.toLowerCase();
   return types[lowerExt] || 'application/octet-stream';
+}
+function getTypeSuffix(mainType, ext) {
+  const e = String(ext || '').toLowerCase();
+  if (mainType === 'image') return 'img';
+  if (mainType === 'video') return 'video';
+  if (mainType === 'audio') return 'audio';
+  if (e === 'apk') return 'app';
+  if (e === 'pdf') return 'pdf';
+  return 'file';
 }
 async function handleBingImagesRequest(request, config) {
   const cache = caches.default;

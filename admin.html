@@ -3921,14 +3921,15 @@ curl -X POST "{SITE_URL}/api/v1/import" \
         document.body.removeChild(textarea);
       },
       handleCopy(index, key) {
-        const link = `${this.baseURL}/file/${key}`;
+        const file = this.tableData.find(f => f.name === key);
+        const link = file?.metadata?.cftcUrl || `${this.baseURL}/file/${key}`;
         (navigator.clipboard?.writeText(link) || this.copyToClipboardFallback(link))
           .then(() => this.$message.success('复制文件链接成功~'))
           .catch(() => this.$message.error('自动复制失败，请手动复制链接：' + link));
       },
       handleQuickCopy(format, key) {  // 快速复制不同格式
-        const url = `${this.baseURL}/file/${key}`;
         const file = this.tableData.find(f => f.name === key);
+        const url = file?.metadata?.cftcUrl || `${this.baseURL}/file/${key}`;
         const name = file?.metadata?.fileName || key;
         let link = url;
         
@@ -4008,13 +4009,13 @@ curl -X POST "{SITE_URL}/api/v1/import" \
         }).catch(() => this.$message.info('已取消批量删除'));
       },
       handleBatchCopy() {  // 批量复制链接
-        const links = this.selectedFiles.map(file => `${document.location.origin}/file/${file.name}`).join('\n');
+        const links = this.selectedFiles.map(file => `${file?.metadata?.cftcUrl || `${document.location.origin}/file/${file.name}`}`).join('\n');
         (navigator.clipboard?.writeText(links) || this.copyToClipboardFallback(links))
           .then(() => this.$message.success('批量复制链接成功~'));
       },
       handleBatchCopyMarkdown() {  // 批量复制Markdown格式
         const links = this.selectedFiles.map(file => {
-          const url = `${document.location.origin}/file/${file.name}`;
+          const url = `${file?.metadata?.cftcUrl || `${document.location.origin}/file/${file.name}`}`;
           const name = file.metadata?.fileName || file.name;
           return `![${name}](${url})`;
         }).join('\n');
@@ -4023,7 +4024,7 @@ curl -X POST "{SITE_URL}/api/v1/import" \
       },
       handleBatchCopyHtml() {  // 批量复制HTML格式
         const links = this.selectedFiles.map(file => {
-          const url = `${document.location.origin}/file/${file.name}`;
+          const url = `${file?.metadata?.cftcUrl || `${document.location.origin}/file/${file.name}`}`;
           const name = file.metadata?.fileName || file.name;
           return `<img src="${url}" alt="${name}">`;
         }).join('\n');
@@ -4187,7 +4188,7 @@ curl -X POST "{SITE_URL}/api/v1/import" \
       },
       exportAllLinks() {  // 导出全部链接
         const loading = this.$message({ message: '正在生成链接列表...', duration: 0 });
-        const links = this.tableData.map(file => `${document.location.origin}/file/${file.name}`);
+        const links = this.tableData.map(file => `${file?.metadata?.cftcUrl || `${document.location.origin}/file/${file.name}`}`);
         const linksText = links.join('\n');
         
         // 创建下载文件

@@ -1168,7 +1168,7 @@
         },
 
         formatLink(img) {
-          const url = `${this.baseURL}/file/${img.name}`;
+          const url = img?.metadata?.cftcUrl || `${this.baseURL}/file/${img.name}`;
           const name = img.metadata?.fileName || img.name;
           switch (this.linkFormat) {
             case 'markdown': return `![${name}](${url})`;
@@ -1280,7 +1280,8 @@
         // 复制预览链接
         copyPreviewLink() {
           if (this.previewData) {
-            this.copyToClipboard(this.previewData.url);
+            const cftcUrl = this.previewData.img?.metadata?.cftcUrl;
+            this.copyToClipboard(cftcUrl || this.previewData.url);
             this.showToast('链接已复制', 'success');
           }
         },
