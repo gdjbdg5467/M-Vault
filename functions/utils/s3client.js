@@ -111,6 +111,34 @@ async function signRequest(method, url, headers, body, credentials) {
     return headers;
 }
 
+/**
+ * 从 S3 错误 XML 响应体中提取 <Message> 字段（如有）
+ */
+function extractS3ErrorMessage(text) {
+    if (!text) return '';
+    const messageMatch = text.match(/<Message>([\s\S]*?)<\/Message>/);
+    if (messageMatch) return messageMatch[1].trim();
+    const codeMatch = text.match(/<Code>([\s\S]*?)<\/Code>/);
+    if (codeMatch) return codeMatch[1].trim();
+    return '';
+}
+
+/**
+ * 判断响应体是否为有效的 S3 XML 响应
+ * （ListBucketResult / ListAllMyBucketsResult / Error 等）
+ */
+function isS3XmlResponse(text, contentType) {
+    const ct = (contentType || '').toLowerCase();
+    if (ct.includes('xml')) return true;
+    return (
+        text.includes('<ListBucketResult') ||
+        text.includes('<ListAllMyBucketsResult') ||
+        text.includes('<Error') ||
+        text.includes('<Owner>') ||
+        text.includes('<Contents>')
+    );
+}
+
 // --- S3 Client 类 ---
 
 export class S3Client {
@@ -168,7 +196,15 @@ export class S3Client {
 
         if (!response.ok) {
             const text = await response.text();
-            throw new Error(`S3 PutObject failed (${response.status}): ${text}`);
+            const s3Message = extractS3ErrorMessage(text);
+            if (response.status === 405) {
+                throw new Error(
+                    `S3 写入失败（405 Method Not Allowed）：该 Endpoint 不允许 PUT 写入（可能是只读网关、或填的不是对象存储地址）。` +
+                    `请检查 Endpoint 是否为对象存储地址（如 R2/MinIO/S3）。` +
+                    (s3Message ? `服务端信息：${s3Message}` : '')
+                );
+            }
+            throw new Error(`S3 PutObject failed (${response.status}): ${s3Message || text}`);
         }
 
         return { etag: response.headers.get('etag') };
@@ -248,17 +284,42 @@ export class S3Client {
 
     /**
      * 检查连接（列出 bucket）
+     * 严格校验：必须返回有效的 S3 XML 响应，避免把返回 HTML 的普通网站误判为"连接正常"
+     * 失败时抛出带明确原因的 Error（调用方在 try/catch 中展示 error.message）
      */
     async checkConnection() {
         const url = `${this.endpoint}/${this.bucket}?list-type=2&max-keys=1`;
         const signedHeaders = await signRequest('GET', url, {}, null, this._getCredentials());
 
-        const response = await fetch(url, {
-            method: 'GET',
-            headers: signedHeaders
-        });
+        let response;
+        try {
+            response = await fetch(url, {
+                method: 'GET',
+                headers: signedHeaders,
+            });
+        } catch (error) {
+            throw new Error(`无法访问该 Endpoint（${this.endpoint}）：${error.message}`);
+        }
 
-        return response.ok;
+        const text = await response.text();
+        const contentType = response.headers.get('content-type') || '';
+
+        if (!response.ok) {
+            const s3Message = extractS3ErrorMessage(text);
+            throw new Error(
+                `连接失败（HTTP ${response.status}）${s3Message ? '：' + s3Message : ''}。请检查 Access Key / Secret / Endpoint。`
+            );
+        }
+
+        // 关键：HTTP 200 但响应体不是 S3 XML —— 说明 Endpoint 填成了普通网站/页面，而非对象存储
+        if (!isS3XmlResponse(text, contentType)) {
+            throw new Error(
+                `Endpoint 返回 HTTP 200，但内容不是有效的 S3 响应（可能返回了网页 HTML）。` +
+                `请检查 Endpoint 是否填了对象存储地址（如 https://<account>.r2.cloudflarestorage.com、MinIO/S3 地址），而不是网站或页面地址。`
+            );
+        }
+
+        return true;
     }
 }
 
