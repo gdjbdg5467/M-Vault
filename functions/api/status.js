@@ -127,7 +127,7 @@ export async function onRequestGet(context) {
     status.r2.configured = true;
     checks.push(
       env.R2_BUCKET.list({ limit: 1 })
-        .then((result) => {
+        .then(async (result) => {
           status.r2 = {
             connected: true,
             enabled: true,
