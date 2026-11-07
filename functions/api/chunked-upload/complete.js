@@ -4,6 +4,7 @@
  */
 import { checkAuthentication, isAuthRequired } from '../../utils/auth.js';
 import { createS3Client } from '../../utils/s3client.js';
+import { resolveR2Bucket, buildS3ClientFromConfig } from '../../utils/r2-registry.js';
 import { uploadToDiscord } from '../../utils/discord.js';
 import { hasHuggingFaceConfig, uploadToHuggingFace } from '../../utils/huggingface.js';
 import { hasWebDAVConfig, normalizeWebDAVPath, uploadToWebDAV } from '../../utils/webdav.js';
@@ -94,12 +95,14 @@ export async function onRequestPost(context) {
     let telegramNoticePayload = null;
 
     if (storageType === 'r2') {
-      if (!env.R2_BUCKET) {
+      const resolved = await resolveR2Bucket(env, taskData.r2Bucket || '');
+      if (!resolved) {
         return jsonResponse({ error: 'R2 未配置，无法完成上传' }, 500);
       }
-      const uploadResult = await uploadToR2(file, fileExtension, env);
+      const uploadResult = await uploadToR2(file, fileExtension, env, resolved, folderPath);
       responseFileKey = uploadResult.fileKey;
       metadataKey = uploadResult.fileKey;
+      extraMetadata.r2BucketId = resolved.type === 's3' ? resolved.id : '__bound__';
     } else if (storageType === 's3') {
       if (!env.S3_ENDPOINT || !env.S3_ACCESS_KEY_ID) {
         return jsonResponse({ error: 'S3 未配置，无法完成上传' }, 500);
@@ -409,20 +412,28 @@ async function uploadToTelegram(file, env) {
   }
 }
 
-async function uploadToR2(file, fileExtension, env) {
+async function uploadToR2(file, fileExtension, env, resolved, folderPath = '') {
   const fileId = `r2_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
   const objectKey = `${fileId}.${fileExtension}`;
   const arrayBuffer = await file.arrayBuffer();
 
-  await env.R2_BUCKET.put(objectKey, arrayBuffer, {
-    httpMetadata: {
+  if (resolved.type === 's3') {
+    const s3 = buildS3ClientFromConfig(resolved.config);
+    await s3.putObject(objectKey, arrayBuffer, {
       contentType: file.type || 'application/octet-stream',
-    },
-    customMetadata: {
-      fileName: file.name,
-      uploadTime: Date.now().toString(),
-    },
-  });
+      metadata: { fileName: file.name, uploadTime: Date.now().toString() },
+    });
+  } else {
+    await env.R2_BUCKET.put(objectKey, arrayBuffer, {
+      httpMetadata: {
+        contentType: file.type || 'application/octet-stream',
+      },
+      customMetadata: {
+        fileName: file.name,
+        uploadTime: Date.now().toString(),
+      },
+    });
+  }
 
   return { fileKey: `r2:${objectKey}` };
 }

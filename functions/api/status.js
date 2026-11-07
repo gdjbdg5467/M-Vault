@@ -1,4 +1,5 @@
 ﻿import { createS3Client } from '../utils/s3client.js';
+import { listAllR2Buckets, maskR2Buckets, hasAvailableR2, buildS3ClientFromConfig } from '../utils/r2-registry.js';
 import { checkDiscordConnection } from '../utils/discord.js';
 import { checkHuggingFaceConnection, hasHuggingFaceConfig } from '../utils/huggingface.js';
 import { checkWebDAVConnection, hasWebDAVConfig } from '../utils/webdav.js';
@@ -134,6 +135,8 @@ export async function onRequestGet(context) {
             layer: 'direct',
             message: 'Connected',
             hasData: Array.isArray(result?.objects) && result.objects.length > 0,
+            buckets: maskR2Buckets(await listAllR2Buckets(env)),
+            bucketCount: (await listAllR2Buckets(env)).length,
           };
         })
         .catch((error) => {
@@ -146,6 +149,43 @@ export async function onRequestGet(context) {
           };
         })
     );
+  } else {
+    // 无绑定桶，但注册表里有桶
+    const registryBuckets = await listAllR2Buckets(env);
+    if (registryBuckets.length > 0) {
+      status.r2.configured = true;
+      status.r2.enabled = await hasAvailableR2(env);
+      const firstEnabled = registryBuckets.find((b) => b.enabled !== false);
+      if (firstEnabled) {
+        checks.push(
+          (async () => {
+            try {
+              const client = buildS3ClientFromConfig(firstEnabled);
+              const connected = await client.checkConnection();
+              status.r2 = {
+                connected,
+                enabled: true,
+                configured: true,
+                layer: 'direct',
+                message: connected ? `Connected: ${firstEnabled.name}` : 'R2 check failed',
+                buckets: maskR2Buckets(registryBuckets),
+                bucketCount: registryBuckets.length,
+              };
+            } catch (error) {
+              status.r2 = {
+                connected: false,
+                enabled: true,
+                configured: true,
+                layer: 'direct',
+                message: error.message || 'R2 check failed',
+                buckets: maskR2Buckets(registryBuckets),
+                bucketCount: registryBuckets.length,
+              };
+            }
+          })()
+        );
+      }
+    }
   }
 
   if (env.S3_ENDPOINT && env.S3_ACCESS_KEY_ID && env.S3_SECRET_ACCESS_KEY && env.S3_BUCKET) {

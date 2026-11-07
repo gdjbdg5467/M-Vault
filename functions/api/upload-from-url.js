@@ -1,4 +1,5 @@
 ﻿import { createS3Client } from "../utils/s3client.js";
+import { resolveR2Bucket, buildS3ClientFromConfig } from "../utils/r2-registry.js";
 import { uploadToDiscord } from "../utils/discord.js";
 import { hasHuggingFaceConfig, uploadToHuggingFace } from "../utils/huggingface.js";
 import { hasWebDAVConfig, normalizeWebDAVPath, uploadToWebDAV } from "../utils/webdav.js";
@@ -68,10 +69,12 @@ export async function onRequestPost(context) {
     const fileExtension = getFileExtension(fileName);
 
     if (storageMode === "r2") {
-      if (!env.R2_BUCKET) {
+      const r2Bucket = String(body?.r2Bucket || "").trim();
+      const resolved = await resolveR2Bucket(env, r2Bucket);
+      if (!resolved) {
         return jsonResponse({ error: "R2 未配置" }, 400);
       }
-      return await uploadToR2(arrayBuffer, fileName, fileExtension, contentType, fileSize, env, folderPath);
+      return await uploadToR2(arrayBuffer, fileName, fileExtension, contentType, fileSize, env, folderPath, resolved);
     }
 
     if (storageMode === "s3") {
@@ -392,15 +395,27 @@ async function processTelegramSuccess(responseData, fileName, fileExtension, mim
   return jsonResponse([{ src: `/file/${directId}` }]);
 }
 
-async function uploadToR2(arrayBuffer, fileName, fileExtension, contentType, fileSize, env, folderPath = "") {
+async function uploadToR2(arrayBuffer, fileName, fileExtension, contentType, fileSize, env, folderPath = "", resolved = null) {
   try {
     const fileId = randomId("r2");
     const objectKey = `${fileId}.${fileExtension}`;
+    const r2BucketId = resolved?.type === "s3" ? resolved.id : "__bound__";
 
-    await env.R2_BUCKET.put(objectKey, arrayBuffer, {
-      httpMetadata: { contentType },
-      customMetadata: { fileName, uploadTime: Date.now().toString() },
-    });
+    if (resolved?.type === "s3") {
+      const s3 = buildS3ClientFromConfig(resolved.config);
+      await s3.putObject(objectKey, arrayBuffer, {
+        contentType,
+        metadata: {
+          fileName,
+          uploadTime: Date.now().toString(),
+        },
+      });
+    } else {
+      await env.R2_BUCKET.put(objectKey, arrayBuffer, {
+        httpMetadata: { contentType },
+        customMetadata: { fileName, uploadTime: Date.now().toString() },
+      });
+    }
 
     if (env.img_url) {
       await env.img_url.put(`r2:${objectKey}`, "", {
@@ -414,6 +429,7 @@ async function uploadToR2(arrayBuffer, fileName, fileExtension, contentType, fil
             fileSize,
             storageType: "r2",
             r2Key: objectKey,
+            r2BucketId,
           },
           folderPath
         ),

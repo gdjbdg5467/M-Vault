@@ -1145,6 +1145,7 @@
                 <el-dropdown-item command="openUploader"><i class="fas fa-cloud-upload-alt"></i> 打开上传中心</el-dropdown-item>
                 <el-dropdown-item command="exportLinks"><i class="fas fa-file-export"></i> 导出全部链接</el-dropdown-item>
                 <el-dropdown-item command="manageApiTokens"><i class="fas fa-key"></i> API Token 管理</el-dropdown-item>
+                <el-dropdown-item command="manageR2Buckets"><i class="fas fa-cloud"></i> R2 桶管理</el-dropdown-item>
                 <el-dropdown-item command="checkStatus" divided><i class="fas fa-heartbeat"></i> 检查连接状态</el-dropdown-item>
               </el-dropdown-menu>
             </el-dropdown>
@@ -1660,6 +1661,133 @@ curl -X POST "{SITE_URL}/api/v1/import" \
     </el-dialog>
 
     <el-dialog
+      title="R2 桶管理"
+      :visible.sync="r2BucketDialogVisible"
+      width="960px"
+      append-to-body
+      custom-class="r2-bucket-manager-dialog">
+      <div class="token-toolbar">
+        <el-button size="mini" type="primary" icon="el-icon-plus" @click="openCreateR2Bucket">新建桶</el-button>
+        <el-button size="mini" icon="el-icon-refresh" :loading="r2BucketsLoading" @click="loadR2Buckets">刷新</el-button>
+        <span v-if="r2BoundAvailable" style="margin-left:12px;color:#909399;font-size:12px;">
+          <i class="fas fa-cloud"></i> 已绑定 Pages R2_BUCKET（绑定桶无需在此配置）
+        </span>
+      </div>
+      <div v-if="r2BucketsLoading" class="token-loading">
+        <i class="el-icon-loading"></i> 正在加载桶...
+      </div>
+      <div v-else-if="r2Buckets.length === 0" class="token-empty">
+        <i class="fas fa-cloud"></i>
+        <p>暂无 R2 桶，点击「新建桶」添加。</p>
+      </div>
+      <el-table
+        v-else
+        :data="r2Buckets"
+        stripe
+        border
+        size="mini"
+        row-key="id">
+        <el-table-column prop="name" label="名称" min-width="150"></el-table-column>
+        <el-table-column prop="endpoint" label="Endpoint" min-width="220" show-overflow-tooltip></el-table-column>
+        <el-table-column prop="region" label="Region" width="88"></el-table-column>
+        <el-table-column prop="bucket" label="Bucket" min-width="150" show-overflow-tooltip></el-table-column>
+        <el-table-column label="默认" width="92" align="center">
+          <template slot-scope="scope">
+            <el-tag v-if="scope.row.isDefault" type="success" size="mini">默认</el-tag>
+            <el-button
+              v-else
+              type="text"
+              size="mini"
+              style="color:#909399;"
+              :disabled="Boolean(r2BucketMutatingMap[scope.row.id])"
+              @click="setDefaultR2Bucket(scope.row)">
+              设为默认
+            </el-button>
+          </template>
+        </el-table-column>
+        <el-table-column label="密钥" width="82" align="center">
+          <template slot-scope="scope">
+            <el-tag v-if="scope.row.hasSecret" type="info" size="mini">已配置</el-tag>
+            <span v-else class="token-time-hint">无</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="状态" width="110" align="center">
+          <template slot-scope="scope">
+            <el-switch
+              v-model="scope.row.enabled"
+              :disabled="Boolean(r2BucketMutatingMap[scope.row.id])"
+              active-color="#13ce66"
+              inactive-color="#ff6b6b"
+              @change="toggleR2BucketEnabled(scope.row)">
+            </el-switch>
+          </template>
+        </el-table-column>
+        <el-table-column label="创建时间" min-width="140">
+          <template slot-scope="scope">
+            <div>{{ formatDateTime(scope.row.createdAt) }}</div>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="140" align="center">
+          <template slot-scope="scope">
+            <el-button
+              type="text"
+              style="color:#409eff"
+              :disabled="Boolean(r2BucketMutatingMap[scope.row.id])"
+              @click="openEditR2Bucket(scope.row)">
+              编辑
+            </el-button>
+            <el-button
+              type="text"
+              style="color:#f56c6c"
+              :disabled="Boolean(r2BucketMutatingMap[scope.row.id])"
+              @click="removeR2Bucket(scope.row)">
+              删除
+            </el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </el-dialog>
+
+    <el-dialog
+      :title="r2BucketFormMode === 'create' ? '新建 R2 桶' : '编辑 R2 桶'"
+      :visible.sync="r2BucketFormVisible"
+      width="600px"
+      append-to-body
+      custom-class="r2-bucket-form-dialog">
+      <el-form label-position="top" size="small">
+        <el-form-item label="名称">
+          <el-input v-model="r2BucketForm.name" maxlength="64" placeholder="例如：个人图床 / 备份桶"></el-input>
+        </el-form-item>
+        <el-form-item label="Endpoint">
+          <el-input v-model="r2BucketForm.endpoint" placeholder="例如：https://xxx.r2.cloudflarestorage.com"></el-input>
+        </el-form-item>
+        <el-form-item label="Region">
+          <el-input v-model="r2BucketForm.region" maxlength="40" placeholder="auto"></el-input>
+        </el-form-item>
+        <el-form-item label="Bucket 名">
+          <el-input v-model="r2BucketForm.bucket" maxlength="128" placeholder="R2 桶名"></el-input>
+        </el-form-item>
+        <el-form-item label="Access Key ID">
+          <el-input v-model="r2BucketForm.accessKeyId" maxlength="128" placeholder="R2 Access Key ID"></el-input>
+        </el-form-item>
+        <el-form-item :label="r2BucketFormMode === 'edit' ? 'Secret Access Key（留空保留原值）' : 'Secret Access Key'">
+          <el-input v-model="r2BucketForm.secretAccessKey" type="password" show-password maxlength="256" placeholder="R2 Secret Access Key"></el-input>
+        </el-form-item>
+        <el-form-item>
+          <div style="display:flex;align-items:center;gap:28px;">
+            <span style="font-size:13px;">启用 <el-switch v-model="r2BucketForm.enabled" active-color="#13ce66" inactive-color="#ff6b6b" style="margin-left:6px;"></el-switch></span>
+            <span style="font-size:13px;">设为默认 <el-switch v-model="r2BucketForm.isDefault" active-color="#13ce66" inactive-color="#ff6b6b" style="margin-left:6px;"></el-switch></span>
+          </div>
+        </el-form-item>
+      </el-form>
+      <span slot="footer" class="dialog-footer">
+        <el-button size="small" :loading="r2BucketTesting" :disabled="r2BucketFormLoading" @click="testR2BucketConnection">测试连接</el-button>
+        <el-button size="small" @click="r2BucketFormVisible = false">取消</el-button>
+        <el-button size="small" type="primary" :loading="r2BucketFormLoading" @click="saveR2Bucket">{{ r2BucketFormMode === 'create' ? '创建' : '保存' }}</el-button>
+      </span>
+    </el-dialog>
+
+    <el-dialog
       title="创建 API Token"
       :visible.sync="createTokenDialogVisible"
       width="560px"
@@ -1998,6 +2126,27 @@ curl -X POST "{SITE_URL}/api/v1/import" \
         maxFileSizeMb: 0,
       },
       storageOptions: ['telegram', 'r2', 's3', 'discord', 'huggingface', 'webdav', 'github'],
+      // R2 桶管理
+      r2BucketDialogVisible: false,
+      r2BucketsLoading: false,
+      r2Buckets: [],
+      r2BoundAvailable: false,
+      r2BucketMutatingMap: {},
+      r2BucketFormVisible: false,
+      r2BucketFormMode: 'create', // create | edit
+      r2BucketFormLoading: false,
+      r2BucketTesting: false,
+      r2BucketForm: {
+        id: '',
+        name: '',
+        endpoint: '',
+        region: 'auto',
+        bucket: '',
+        accessKeyId: '',
+        secretAccessKey: '',
+        enabled: true,
+        isDefault: false,
+      },
       moveDialogVisible: false,
       moveDialogLoading: false,
       moveDialogFoldersLoading: false,
@@ -2268,6 +2417,229 @@ curl -X POST "{SITE_URL}/api/v1/import" \
         if (diff < day) return `${Math.floor(diff / hour)} 小时前`;
         if (diff < day * 30) return `${Math.floor(diff / day)} 天前`;
         return this.formatDateTime(value);
+      },
+      openR2BucketDialog() {
+        this.r2BucketDialogVisible = true;
+        this.loadR2Buckets();
+      },
+      async loadR2Buckets() {
+        this.r2BucketsLoading = true;
+        try {
+          const response = await fetch('./api/admin/r2-buckets', {
+            method: 'GET',
+            credentials: 'include',
+          });
+          const payload = await response.json();
+          if (!response.ok || !payload?.success) {
+            throw new Error(payload?.error?.message || payload?.message || '加载 R2 桶列表失败。');
+          }
+          this.r2Buckets = Array.isArray(payload.buckets) ? payload.buckets : [];
+          this.r2BoundAvailable = !!payload.boundAvailable;
+        } catch (error) {
+          this.$message.error(error.message || '加载 R2 桶失败。');
+        } finally {
+          this.r2BucketsLoading = false;
+        }
+      },
+      openCreateR2Bucket() {
+        this.r2BucketFormMode = 'create';
+        this.r2BucketForm = {
+          id: '',
+          name: '',
+          endpoint: '',
+          region: 'auto',
+          bucket: '',
+          accessKeyId: '',
+          secretAccessKey: '',
+          enabled: true,
+          isDefault: false,
+        };
+        this.r2BucketFormVisible = true;
+      },
+      openEditR2Bucket(row) {
+        this.r2BucketFormMode = 'edit';
+        this.r2BucketForm = {
+          id: row.id,
+          name: row.name || '',
+          endpoint: row.endpoint || '',
+          region: row.region || 'auto',
+          bucket: row.bucket || '',
+          accessKeyId: '',
+          secretAccessKey: '',
+          enabled: row.enabled !== false,
+          isDefault: !!row.isDefault,
+        };
+        this.r2BucketFormVisible = true;
+      },
+      async testR2BucketConnection() {
+        const form = this.r2BucketForm;
+        const endpoint = String(form.endpoint || '').trim();
+        const bucket = String(form.bucket || '').trim();
+        const accessKeyId = String(form.accessKeyId || '').trim();
+        const secretAccessKey = String(form.secretAccessKey || '').trim();
+        if (!endpoint) { this.$message.warning('请输入 Endpoint。'); return; }
+        if (!bucket) { this.$message.warning('请输入 R2 桶名。'); return; }
+        if (!accessKeyId) { this.$message.warning('请输入 Access Key ID。'); return; }
+        if (!secretAccessKey) {
+          this.$message.warning('请输入 Secret Access Key（编辑模式下留空无法测试）。');
+          return;
+        }
+        this.r2BucketTesting = true;
+        try {
+          const response = await fetch('./api/admin/r2-buckets/test', {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              endpoint,
+              region: String(form.region || '').trim() || 'auto',
+              bucket,
+              accessKeyId,
+              secretAccessKey,
+            }),
+          });
+          const payload = await response.json();
+          if (!response.ok || !payload?.success) {
+            throw new Error(payload?.error?.message || payload?.message || '连接测试失败。');
+          }
+          this.$message.success('连接成功：可以访问该 R2 桶。');
+        } catch (error) {
+          this.$message.error(error.message || '连接测试失败。');
+        } finally {
+          this.r2BucketTesting = false;
+        }
+      },
+      async saveR2Bucket() {
+        const form = this.r2BucketForm;
+        const name = String(form.name || '').trim();
+        const endpoint = String(form.endpoint || '').trim();
+        const bucket = String(form.bucket || '').trim();
+        const accessKeyId = String(form.accessKeyId || '').trim();
+        const secretAccessKey = String(form.secretAccessKey || '').trim();
+        if (!name) { this.$message.warning('请输入桶名称。'); return; }
+        if (!endpoint) { this.$message.warning('请输入 Endpoint。'); return; }
+        if (!bucket) { this.$message.warning('请输入 R2 桶名。'); return; }
+        if (!accessKeyId) { this.$message.warning('请输入 Access Key ID。'); return; }
+        if (this.r2BucketFormMode === 'create' && !secretAccessKey) {
+          this.$message.warning('请输入 Secret Access Key。');
+          return;
+        }
+
+        const isCreate = this.r2BucketFormMode === 'create';
+        const body = {
+          name,
+          endpoint,
+          region: String(form.region || '').trim() || 'auto',
+          bucket,
+          accessKeyId,
+          enabled: form.enabled !== false,
+          isDefault: !!form.isDefault,
+        };
+        // 编辑时 secretAccessKey 留空则后端保留原值
+        if (isCreate || secretAccessKey) {
+          body.secretAccessKey = secretAccessKey;
+        }
+
+        this.r2BucketFormLoading = true;
+        try {
+          const url = isCreate
+            ? './api/admin/r2-buckets'
+            : `./api/admin/r2-buckets/${encodeURIComponent(form.id)}`;
+          const response = await fetch(url, {
+            method: isCreate ? 'POST' : 'PUT',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+          const payload = await response.json();
+          if (!response.ok || !payload?.success) {
+            throw new Error(payload?.error?.message || payload?.message || (isCreate ? '创建 R2 桶失败。' : '保存 R2 桶失败。'));
+          }
+          this.$message.success(isCreate ? 'R2 桶已创建。' : 'R2 桶已保存。');
+          this.r2BucketFormVisible = false;
+          this.loadR2Buckets();
+        } catch (error) {
+          this.$message.error(error.message || '保存 R2 桶失败。');
+        } finally {
+          this.r2BucketFormLoading = false;
+        }
+      },
+      async toggleR2BucketEnabled(row) {
+        const bucketId = row?.id;
+        if (!bucketId) return;
+        const nextEnabled = Boolean(row.enabled);
+        this.$set(this.r2BucketMutatingMap, bucketId, true);
+        try {
+          const response = await fetch(`./api/admin/r2-buckets/${encodeURIComponent(bucketId)}`, {
+            method: 'PUT',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: nextEnabled }),
+          });
+          const payload = await response.json();
+          if (!response.ok || !payload?.success) {
+            throw new Error(payload?.error?.message || payload?.message || '更新桶状态失败。');
+          }
+          this.$message.success(nextEnabled ? '桶已启用。' : '桶已禁用。');
+        } catch (error) {
+          row.enabled = !nextEnabled;
+          this.$message.error(error.message || '更新桶状态失败。');
+        } finally {
+          this.$delete(this.r2BucketMutatingMap, bucketId);
+        }
+      },
+      async setDefaultR2Bucket(row) {
+        const bucketId = row?.id;
+        if (!bucketId) return;
+        this.$set(this.r2BucketMutatingMap, bucketId, true);
+        try {
+          const response = await fetch(`./api/admin/r2-buckets/${encodeURIComponent(bucketId)}`, {
+            method: 'PUT',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ isDefault: true }),
+          });
+          const payload = await response.json();
+          if (!response.ok || !payload?.success) {
+            throw new Error(payload?.error?.message || payload?.message || '设为默认失败。');
+          }
+          this.$message.success(`已将「${row.name}」设为默认桶。`);
+          this.loadR2Buckets();
+        } catch (error) {
+          this.$message.error(error.message || '设为默认失败。');
+        } finally {
+          this.$delete(this.r2BucketMutatingMap, bucketId);
+        }
+      },
+      async removeR2Bucket(row) {
+        const bucketId = row?.id;
+        if (!bucketId) return;
+        try {
+          await this.$confirm(`确认删除 R2 桶「${row.name}」吗？此操作不可撤销。`, '删除确认', {
+            type: 'warning',
+            confirmButtonText: '删除',
+            cancelButtonText: '取消',
+          });
+        } catch {
+          return;
+        }
+        this.$set(this.r2BucketMutatingMap, bucketId, true);
+        try {
+          const response = await fetch(`./api/admin/r2-buckets/${encodeURIComponent(bucketId)}`, {
+            method: 'DELETE',
+            credentials: 'include',
+          });
+          const payload = await response.json();
+          if (!response.ok || !payload?.success) {
+            throw new Error(payload?.error?.message || payload?.message || '删除 R2 桶失败。');
+          }
+          this.$message.success('R2 桶已删除。');
+          this.loadR2Buckets();
+        } catch (error) {
+          this.$message.error(error.message || '删除 R2 桶失败。');
+        } finally {
+          this.$delete(this.r2BucketMutatingMap, bucketId);
+        }
       },
       openApiTokenDialog() {
         this.tokenDialogVisible = true;
@@ -4112,6 +4484,7 @@ curl -X POST "{SITE_URL}/api/v1/import" \
           case 'openUploader': this.openUploader(); break;
           case 'exportLinks': this.exportAllLinks(); break;
           case 'manageApiTokens': this.openApiTokenDialog(); break;
+          case 'manageR2Buckets': this.openR2BucketDialog(); break;
           case 'checkStatus': this.checkConnectionStatus(); break;
         }
       },

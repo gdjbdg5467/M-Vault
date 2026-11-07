@@ -30,6 +30,7 @@ export async function onRequestPost(context) {
 
     const body = await request.json();
     const { fileName, fileSize, fileType, totalChunks, storageMode } = body || {};
+    const r2Bucket = String(body?.r2Bucket || '').trim();
     const folderPath = normalizeFolderPath(body?.folderPath || body?.folder || '');
     const normalizedFileSize = Number(fileSize || 0);
     const normalizedTotalChunks = Number(totalChunks || 0);
@@ -57,6 +58,7 @@ export async function onRequestPost(context) {
       fileType,
       totalChunks: normalizedTotalChunks,
       storageMode: normalizedStorage,
+      r2Bucket,
       folderPath,
       chunkBackend,
       uploadedChunks: [],

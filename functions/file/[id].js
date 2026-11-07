@@ -1,4 +1,5 @@
 ﻿import { createS3Client } from '../utils/s3client.js';
+import { resolveR2Bucket, buildS3ClientFromConfig, BOUND_BUCKET_ID } from '../utils/r2-registry.js';
 import { getDiscordFileUrl } from '../utils/discord.js';
 import { getHuggingFaceFile } from '../utils/huggingface.js';
 import { getWebDAVFile } from '../utils/webdav.js';
@@ -413,13 +414,48 @@ async function backfillSignedTelegramMetadata(env, signedMeta) {
   }
 }
 
+async function resolveR2Reader(env, bucketId) {
+  const resolved = await resolveR2Bucket(env, bucketId || '');
+  if (!resolved) return null;
+
+  if (resolved.type === 's3') {
+    const s3 = buildS3ClientFromConfig(resolved.config);
+    return {
+      kind: 's3',
+      async head(key) {
+        const h = await s3.headObject(key);
+        return h ? { size: h.contentLength, contentType: h.contentType } : null;
+      },
+      async get(key, rangeSpec = null) {
+        const resp = await s3.getObject(
+          key,
+          rangeSpec ? { range: `bytes=${rangeSpec.offset}-${rangeSpec.offset + rangeSpec.length - 1}` } : {}
+        );
+        if (!resp) return null;
+        const size = parseInt(resp.headers.get('content-length') || '0', 10) || null;
+        return { body: resp.body, size, status: rangeSpec ? 206 : (resp.status || 200) };
+      },
+    };
+  }
+
+  return {
+    kind: 'bound',
+    async head(key) {
+      const h = await env.R2_BUCKET.head(key);
+      return h ? { size: h.size, contentType: h.httpMetadata?.contentType } : null;
+    },
+    async get(key, rangeSpec = null) {
+      const obj = rangeSpec
+        ? await env.R2_BUCKET.get(key, { range: rangeSpec })
+        : await env.R2_BUCKET.get(key);
+      return obj ? { body: obj.body, size: obj.size, status: rangeSpec ? 206 : 200 } : null;
+    },
+  };
+}
+
 async function handleR2File(context, r2Key, record = null) {
   const { request, env } = context;
   const requestUrl = new URL(request.url);
-
-  if (!env.R2_BUCKET) {
-    return errorResponse('R2 storage not configured', 500);
-  }
 
   if (!record?.metadata) {
     const resolved = await getR2RecordFromKV(env, r2Key);
@@ -428,6 +464,11 @@ async function handleR2File(context, r2Key, record = null) {
 
   if (!record?.metadata) {
     return errorResponse('File not found', 404);
+  }
+
+  const reader = await resolveR2Reader(env, record.metadata.r2BucketId);
+  if (!reader) {
+    return errorResponse('R2 storage not configured', 500);
   }
 
   if (shouldBlock(record.metadata)) {
@@ -441,13 +482,13 @@ async function handleR2File(context, r2Key, record = null) {
   const mimeType = getMimeType(fileName);
 
   const rangeHeader = request.headers.get('Range');
-  let object;
+  let object = null;
   let responseStatus = 200;
   let contentLength = null;
   let contentRange = null;
 
   if (rangeHeader) {
-    const head = await env.R2_BUCKET.head(r2Key);
+    const head = await reader.head(r2Key);
     if (!head) return errorResponse('File not found in R2', 404);
 
     const range = parseSimpleRange(rangeHeader, head.size);
@@ -461,17 +502,17 @@ async function handleR2File(context, r2Key, record = null) {
       }
 
       const { start, end } = range;
-      object = await env.R2_BUCKET.get(r2Key, {
-        range: { offset: start, length: end - start + 1 },
-      });
-      responseStatus = 206;
-      contentLength = end - start + 1;
-      contentRange = `bytes ${start}-${end}/${head.size}`;
+      object = await reader.get(r2Key, { offset: start, length: end - start + 1 });
+      if (object) {
+        responseStatus = 206;
+        contentLength = end - start + 1;
+        contentRange = `bytes ${start}-${end}/${head.size}`;
+      }
     }
   }
 
   if (!object) {
-    object = await env.R2_BUCKET.get(r2Key);
+    object = await reader.get(r2Key);
   }
 
   if (!object) {
@@ -480,11 +521,11 @@ async function handleR2File(context, r2Key, record = null) {
 
   const headers = new Headers();
   addResponseHeaders(headers, fileName, mimeType);
-  headers.set('Content-Length', String(contentLength ?? object.size));
+  headers.set('Content-Length', String(contentLength ?? object.size ?? ''));
   if (contentRange) headers.set('Content-Range', contentRange);
 
   return new Response(object.body, {
-    status: responseStatus,
+    status: object.status || responseStatus,
     headers,
   });
 }

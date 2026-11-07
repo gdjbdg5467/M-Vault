@@ -2,6 +2,7 @@ import { errorHandling, telemetryData } from "./utils/middleware.js";
 import { checkAuthentication, isAuthRequired } from "./utils/auth.js";
 import { checkGuestUpload, incrementGuestCount } from "./utils/guest.js";
 import { createS3Client } from "./utils/s3client.js";
+import { resolveR2Bucket, buildS3ClientFromConfig } from "./utils/r2-registry.js";
 import { uploadToDiscord } from "./utils/discord.js";
 import { hasHuggingFaceConfig, uploadToHuggingFace } from "./utils/huggingface.js";
 import { hasWebDAVConfig, normalizeWebDAVPath, uploadToWebDAV } from "./utils/webdav.js";
@@ -87,10 +88,12 @@ export async function onRequestPost(context) {
     let result;
 
     if (storageMode === "r2") {
-      if (!env.R2_BUCKET) {
+      const r2Bucket = String(formData.get("r2Bucket") || "").trim();
+      const resolved = await resolveR2Bucket(env, r2Bucket);
+      if (!resolved) {
         return errorResponse("R2 未配置。");
       }
-      result = await uploadToR2(uploadFile, fileName, fileExtension, env, folderPath);
+      result = await uploadToR2(uploadFile, fileName, fileExtension, env, folderPath, r2Bucket);
     } else if (storageMode === "s3") {
       if (!env.S3_ENDPOINT || !env.S3_ACCESS_KEY_ID) {
         return errorResponse("S3 未配置。");
@@ -386,16 +389,29 @@ async function sendToTelegram(formData, apiEndpoint, env, retryCount = 0) {
   }
 }
 
-async function uploadToR2(file, fileName, fileExtension, env, folderPath = "") {
+async function uploadToR2(file, fileName, fileExtension, env, folderPath = "", bucketSelector = "") {
   try {
     const fileId = randomId("r2");
     const objectKey = `${fileId}.${fileExtension}`;
     const arrayBuffer = await file.arrayBuffer();
 
-    await env.R2_BUCKET.put(objectKey, arrayBuffer, {
-      httpMetadata: { contentType: file.type },
-      customMetadata: { fileName, uploadTime: Date.now().toString() },
-    });
+    const resolved = await resolveR2Bucket(env, bucketSelector);
+    if (!resolved) {
+      return errorResponse("R2 未配置。");
+    }
+
+    if (resolved.type === "s3") {
+      const s3 = buildS3ClientFromConfig(resolved.config);
+      await s3.putObject(objectKey, arrayBuffer, {
+        contentType: file.type,
+        metadata: { fileName, uploadTime: Date.now().toString() },
+      });
+    } else {
+      await env.R2_BUCKET.put(objectKey, arrayBuffer, {
+        httpMetadata: { contentType: file.type },
+        customMetadata: { fileName, uploadTime: Date.now().toString() },
+      });
+    }
 
     if (env.img_url) {
       await env.img_url.put(`r2:${objectKey}`, "", {
@@ -409,6 +425,7 @@ async function uploadToR2(file, fileName, fileExtension, env, folderPath = "") {
             fileSize: file.size,
             storageType: "r2",
             r2Key: objectKey,
+            r2BucketId: resolved.type === "s3" ? resolved.id : "__bound__",
           },
           folderPath
         ),
