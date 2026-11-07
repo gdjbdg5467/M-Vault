@@ -429,6 +429,30 @@ curl "https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getWebhookInfo"
 3. 在 Cloudflare Pages 项目中添加上述环境变量
 4. 重新部署，前端将自动显示 S3 存储选项
 
+### 多桶存储注册表（桶管理，推荐）
+
+除环境变量/绑定外，可在**管理后台 → 桶管理**动态添加多个 S3/R2 桶，无需改环境变量重部署：
+
+- 每个桶配置：`Endpoint`、`Bucket`、`Access Key ID`、`Secret Access Key`、类型（S3/R2）
+- 支持：**测试连接**、**设为默认**、启用/禁用、编辑、删除
+- 上传时优先使用选中的桶（默认桶或用户自选），读取直链自动定位到对应桶
+
+> **Endpoint 必须是真实对象存储的 S3 API 地址**，不能填网页地址：
+>
+> - ✅ Cloudflare R2：`https://{account_id}.r2.cloudflarestorage.com`（S3 API 端点）
+> - ✅ MinIO：`http://{host}:9000` ｜ AWS S3：`https://s3.{region}.amazonaws.com`
+> - ❌ `.r2.dev` 公开域名、自定义域名、站点域名（如 `https://example.com`）——这些返回的是网页 HTML 而非 S3 XML，会被判定为"连接正常"（假阳性），但实际 PUT 写入会失败（405）
+>
+> 本项目已对 `checkConnection` 做了严格校验：仅当响应体是真实 S3 XML（`ListBucketResult`/`Error`）才判定连接正常；`putObject` 遇 405 会给出明确提示（Endpoint 可能为只读网关或填的不是对象存储地址）。
+
+### TG Bot 存储切换（Telegram 面板）
+
+TG Bot 面板新增 **🪣 选择存储桶** 按钮，可切换上传目标：
+
+- **默认绑定桶**：使用 Pages 绑定的 `R2_BUCKET`（或配置的默认桶）
+- **注册表桶**：选择桶管理里添加的任意 S3/R2 桶，后续上传写入该桶
+- 未选择时回退到默认绑定桶，不影响现有用户；直链读取自动按记录中的桶定位
+
 ### Discord 存储（可选）
 
 通过 Discord 频道存储文件，支持 Webhook 和 Bot 两种方式。
