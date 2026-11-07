@@ -1,3 +1,5 @@
+import { resolveR2Bucket, buildS3ClientFromConfig, listAllR2Buckets, BOUND_BUCKET_ID } from './r2-registry.js';
+
 async function initDatabase(config) {
   console.log("开始数据库初始化...");
   if (!config || !config.database) {
@@ -58,6 +60,7 @@ async function recreateAllTables(config) {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         chat_id TEXT NOT NULL UNIQUE,
         storage_type TEXT DEFAULT 'telegram',
+        r2_bucket_id TEXT,
         current_category_id INTEGER,
         waiting_for TEXT,
         editing_file_id TEXT,
@@ -116,7 +119,8 @@ async function validateDatabaseStructure(config) {
         { name: 'storage_type', type: 'TEXT' },
         { name: 'current_category_id', type: 'INTEGER' },
         { name: 'waiting_for', type: 'TEXT' },
-        { name: 'editing_file_id', type: 'TEXT' }
+        { name: 'editing_file_id', type: 'TEXT' },
+        { name: 'r2_bucket_id', type: 'TEXT' }
       ],
       files: [
         { name: 'id', type: 'INTEGER' },
@@ -225,6 +229,7 @@ async function recreateUserSettingsTable(config) {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         chat_id TEXT NOT NULL UNIQUE,
         storage_type TEXT DEFAULT 'r2',
+        r2_bucket_id TEXT,
         category_id INTEGER,
         custom_suffix TEXT,
         waiting_for TEXT,
@@ -394,6 +399,7 @@ async function setWebhook(webhookUrl, botToken) {
 }
 export function buildConfig(env, request) {
   return {
+    env: env,
     domain: env.DOMAIN || (request && request.headers ? request.headers.get("host") || '' : ''),
     database: env.DATABASE,
     username: env.USERNAME || '',
@@ -965,6 +971,7 @@ function getKeyboardLayout(userSetting) {
     inline_keyboard: [
       [
         { text: "📤 切换存储", callback_data: "switch_storage" },
+        { text: "🪣 选择存储桶", callback_data: "select_r2_bucket" },
         { text: "📋 选择分类", callback_data: "list_categories" }
       ],
       [
@@ -1049,6 +1056,54 @@ async function handleCallbackQuery(update, config, userSetting) {
         });
       }
       await sendPanel(chatId, { ...userSetting, storage_type: newStorageType }, config);
+    }
+    else if (cbData === 'select_r2_bucket') {
+      await answerPromise;
+      try {
+        const buckets = await listAllR2Buckets(config.env);
+        const enabled = buckets.filter(b => b.enabled !== false);
+        const current = (userSetting && userSetting.r2_bucket_id) || '';
+        const currentName = current && current !== BOUND_BUCKET_ID
+          ? (enabled.find(x => x.id === current)?.name || current)
+          : '默认绑定桶';
+        const rows = [];
+        rows.push([{ text: `${currentName === '默认绑定桶' ? '✅ ' : ''}📦 默认绑定桶`, callback_data: `set_r2_bucket_${BOUND_BUCKET_ID}` }]);
+        for (const b of enabled) {
+          const label = `${b.id === current ? '✅ ' : ''}${b.name || b.id}`;
+          rows.push([{ text: label, callback_data: `set_r2_bucket_${b.id}` }]);
+        }
+        await fetch(`https://api.telegram.org/bot${config.tgBotToken}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: chatId,
+            text: `🪣 请选择上传存储桶\n当前：${currentName}`,
+            reply_markup: { inline_keyboard: rows },
+            parse_mode: 'HTML',
+          })
+        });
+      } catch (e) {
+        console.error('选择存储桶失败:', e.message);
+        await sendMessage(chatId, `❌ 获取存储桶列表失败: ${e.message}`, config.tgBotToken);
+      }
+    }
+    else if (cbData.startsWith('set_r2_bucket_')) {
+      const bucketId = cbData.substring('set_r2_bucket_'.length);
+      await config.database.prepare('UPDATE user_settings SET r2_bucket_id = ? WHERE chat_id = ?')
+        .bind(bucketId, chatId).run();
+      await answerPromise;
+      let name = '默认绑定桶';
+      if (bucketId !== BOUND_BUCKET_ID) {
+        try {
+          const buckets = await listAllR2Buckets(config.env);
+          const found = buckets.find(b => b.id === bucketId);
+          if (found) name = found.name || found.id;
+        } catch (e) {
+          console.error('读取桶名称失败:', e.message);
+        }
+      }
+      await sendMessage(chatId, `✅ 已设置上传存储桶：${name}`, config.tgBotToken);
+      await sendPanel(chatId, { ...userSetting, r2_bucket_id: bucketId }, config);
     }
     else if (cbData === 'list_categories') {
       const categoriesPromise = config.database.prepare('SELECT id, name FROM categories').all();
@@ -1372,14 +1427,27 @@ async function handleMediaUpload(chatId, file, isDocument, config, userSetting) 
     }));
     const storageType = userSetting && userSetting.storage_type ? userSetting.storage_type : 'r2';
     let finalUrl, dbFileId, dbMessageId;
+    let activeBucketId = '';
     const timestamp = Date.now();
     const typeSuffix = getTypeSuffix(mainType, ext);
     const key = await generateStorageKey(config, typeSuffix, ext);
-    if (storageType === 'r2' && config.bucket) {
+    if (storageType === 'r2') {
       const arrayBuffer = await fileResponse.arrayBuffer();
-      await config.bucket.put(key, arrayBuffer, { 
-        httpMetadata: { contentType: mimeType } 
-      });
+      const selectedBucketId = (userSetting && userSetting.r2_bucket_id) || '';
+      if (selectedBucketId && selectedBucketId !== BOUND_BUCKET_ID) {
+        const resolved = await resolveR2Bucket(config.env, selectedBucketId);
+        if (resolved && resolved.type === 's3') {
+          const s3 = buildS3ClientFromConfig(resolved.config);
+          await s3.putObject(key, arrayBuffer, { contentType: mimeType });
+          activeBucketId = resolved.id;
+        } else {
+          if (!config.bucket) throw new Error('R2 存储未配置');
+          await config.bucket.put(key, arrayBuffer, { httpMetadata: { contentType: mimeType } });
+        }
+      } else {
+        if (!config.bucket) throw new Error('R2 存储未配置');
+        await config.bucket.put(key, arrayBuffer, { httpMetadata: { contentType: mimeType } });
+      }
       finalUrl = `https://${config.domain}/${key}`;
       dbFileId = key;
       dbMessageId = -1;
@@ -1511,7 +1579,10 @@ async function handleMediaUpload(chatId, file, isDocument, config, userSetting) 
           Label: 'None',
           source: 'cftc-upload',
         };
-        if (storageType === 'r2') kvMetadata.r2Key = key;
+        if (storageType === 'r2') {
+          kvMetadata.r2Key = key;
+          kvMetadata.r2BucketId = activeBucketId || '';
+        }
         await config.imgUrl.put(key, '', { metadata: kvMetadata });
       } catch (kvError) {
         console.error('KV 写入失败:', kvError.message);
